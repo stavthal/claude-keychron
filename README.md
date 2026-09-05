@@ -92,7 +92,7 @@ kbd off             # disable, restore your own lighting
 | `kbd autostart on\|off\|status\|remove` | Whether it starts at login |
 | `kbd hotkeys start\|stop\|restart\|pause\|resume\|status\|log` | `Option+1..9` |
 | `kbd sessions` (`ls`) | Numbered session list with slots and PR numbers |
-| `kbd go [n]` | Jump to session n. No n = whichever has waited longest |
+| `kbd go [n]` | Jump to session n (~0.03s). No n = whichever has waited longest |
 | `kbd restore` / `kbd save` | Restore your lighting / re-capture it as the baseline |
 | `kbd test` | Cycle through every state |
 | `kbd install` / `uninstall` | Add or remove the Claude Code hooks |
@@ -162,6 +162,31 @@ flash, so this is safe to drive continuously.
 Claude desktop app already handles. Note that `claude://code/needs-input` only
 moves you when a session is genuinely blocked on a permission prompt, which
 makes it useless for jumping on demand.
+
+### Why the code avoids the session store on hot paths
+
+Claude's session records are large and numerous. On the development machine:
+**574 files, 310 MB of JSON**. Anything that walks them must not sit on a path
+that runs often, and two things did.
+
+**Jumping** resolved a slot by scanning the whole store in a fresh Python
+process. Measured at **13.8s per keypress**. `slots.json` already holds the
+`slot -> session` mapping, so `slots.lookup()` reads that one file and nothing
+else: **0.03s**, a 460x difference.
+
+`slots.current()` still exists and still prunes entries whose session has
+disappeared, but pruning costs a full store walk, and a jump does not need it.
+A stale entry simply opens a session that has since ended, which is a much
+better outcome than a keypress that feels broken. Correctness on a rare edge
+case is not worth fourteen seconds on the common one.
+
+**The daemon** called `session_meta()` and `slot_order()` on every 0.10s frame,
+each walking the same store, and sat at **8.1% CPU** permanently. Records are
+now cached per file on mtime, and both refresh on a 4s timer, since titles and
+PR state change slowly. Sustained CPU is now **0.6%**.
+
+If you fork this, the rule is: `slots.json` is the hot path, the session store
+is the cold one. Keep it that way.
 
 ## Safety
 
