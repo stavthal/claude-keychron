@@ -1,0 +1,300 @@
+#!/usr/bin/env bash
+# kbd - control the Keychron V1 Max backlight and its Claude Code integration.
+set -uo pipefail
+
+KDIR="$HOME/.claude/keychron"
+PY="$KDIR/venv/bin/python"
+FLAG="$KDIR/disabled"
+USAGE_CACHE="/tmp/.claude_usage_cache"
+SESSIONS="$KDIR/state.json"
+
+die() { printf '%s\n' "$*" >&2; exit 1; }
+[ -x "$PY" ] || die "kbd: missing venv at $KDIR/venv (reinstall required)"
+
+usage() {
+cat <<'TXT'
+kbd - Keychron V1 Max backlight control
+
+  kbd on              enable the Claude integration
+  kbd off             disable it and restore your own lighting
+  kbd toggle          flip between on and off
+  kbd status          show what is enabled, connected and current usage
+
+  kbd daemon start    drive the lighting continuously (pulse patterns)
+  kbd daemon stop     stop it and restore your lighting
+  kbd hotkeys start   Option+1..9 jumps to the session on F1..F9
+  kbd hotkeys stop    turn that off entirely
+  kbd hotkeys pause   keep it running but let the keys through
+
+  kbd autostart on    start automatically at login
+  kbd autostart off   stop now and do not start at login
+
+  kbd sessions        list your sessions, most urgent first
+  kbd go [n]          jump to session n (no n = whichever needs you)
+
+  kbd restore         put your saved lighting back right now
+  kbd save            re-capture the current lighting as your baseline
+  kbd test            cycle through every Claude state so you can see them
+
+  kbd install         add the Claude Code hooks to settings.json
+  kbd uninstall       remove them again (a backup is always written)
+
+  kbd preset <name>   idle | working | thinking | attention | error | done
+  kbd color <h> <s>   set hue and saturation (0-255 each)
+  kbd bright <v>      set brightness (0-255)
+  kbd effect <id>     set effect (1 = solid, 5 = breathing)
+  kbd probe           list the keyboard's HID interfaces
+  kbd version         read the VIA protocol version
+
+Off switches, weakest to strongest:
+  unplug the cable  ->  kbd off  ->  kbd uninstall  ->  power cycle the keyboard
+Nothing is ever written to the keyboard's own memory, so a power cycle
+always brings your stored profile back.
+TXT
+}
+
+connected() { "$PY" "$KDIR/kbd.py" probe 2>/dev/null | grep -q "0xFF60"; }
+
+cmd_on() {
+  rm -f "$FLAG"
+  echo "Claude integration: ON"
+  connected && "$PY" "$KDIR/hook.py" idle </dev/null \
+            || echo "  (keyboard not on USB; lights resume when you plug in)"
+}
+
+cmd_off() {
+  : > "$FLAG"
+  echo "Claude integration: OFF"
+  if connected; then
+    "$PY" "$KDIR/kbd.py" restore >/dev/null 2>&1 && echo "  your lighting restored"
+  fi
+}
+
+DPID="$KDIR/daemon.pid"
+LABEL="com.claude-keychron.lighting"
+PLIST="$HOME/Library/LaunchAgents/$LABEL.plist"
+GUI="gui/$(id -u)"
+
+daemon_alive()    { [ -f "$DPID" ] && kill -0 "$(cat "$DPID" 2>/dev/null)" 2>/dev/null; }
+agent_installed() { [ -f "$PLIST" ]; }
+agent_loaded()    { launchctl print "$GUI/$LABEL" >/dev/null 2>&1; }
+
+cmd_daemon() {
+  case "$1" in
+    start)
+      daemon_alive && { echo "daemon already running (pid $(cat "$DPID"))"; return; }
+      if agent_installed; then
+        launchctl enable "$GUI/$LABEL" 2>/dev/null
+        # bootout is asynchronous, so a start straight after a stop can race
+        # and fail silently. Retry until launchd accepts it.
+        n=0
+        while [ $n -lt 10 ]; do
+          agent_loaded && break
+          launchctl bootstrap "$GUI" "$PLIST" 2>/dev/null
+          agent_loaded && break
+          n=$((n + 1)); sleep 0.5
+        done
+        agent_loaded || echo "  warning: launchd would not load the agent"
+        launchctl kickstart "$GUI/$LABEL" 2>/dev/null
+      else
+        nohup "$PY" "$KDIR/daemon.py" >/dev/null 2>&1 &
+      fi
+      n=0
+      while [ $n -lt 10 ] && ! daemon_alive; do n=$((n + 1)); sleep 0.5; done
+      daemon_alive && echo "daemon started (pid $(cat "$DPID"))" || echo "daemon failed to start"
+      ;;
+    stop)
+      # launchd has KeepAlive, so killing the pid would just respawn it.
+      if agent_loaded; then
+        launchctl bootout "$GUI/$LABEL" 2>/dev/null
+      elif daemon_alive; then
+        kill "$(cat "$DPID")" 2>/dev/null
+      else
+        echo "daemon not running"; return
+      fi
+      # bootout is asynchronous; wait for the process to actually be gone so a
+      # following start does not see a corpse and decide it is already running.
+      n=0
+      while [ $n -lt 20 ] && pgrep -f "keychron/daemon.py" >/dev/null 2>&1; do
+        n=$((n + 1)); sleep 0.25
+      done
+      pgrep -f "keychron/daemon.py" >/dev/null 2>&1 && pkill -f "keychron/daemon.py"
+      rm -f "$DPID"
+      echo "daemon stopped (this boot; autostart is still $(agent_installed && echo on || echo off))"
+      "$PY" "$KDIR/kbd.py" restore >/dev/null 2>&1
+      ;;
+    status|"")
+      daemon_alive && echo "daemon: running (pid $(cat "$DPID"))" || echo "daemon: not running"
+      ;;
+    *) echo "usage: kbd daemon start|stop|status" ;;
+  esac
+}
+
+HKPID="$KDIR/hotkeys.pid"
+HKLABEL="com.claude-keychron.hotkeys"
+HKPLIST="$HOME/Library/LaunchAgents/$HKLABEL.plist"
+HKFLAG="$KDIR/hotkeys-disabled"
+HKPY="$KDIR/venv/bin/kbd-hotkeys-python"
+
+hk_alive()  { pgrep -f "keychron/hotkeys.py" >/dev/null 2>&1; }
+hk_loaded() { launchctl print "$GUI/$HKLABEL" >/dev/null 2>&1; }
+hk_tapped() { grep -q "listening for Option" $KDIR/hotkeys.log 2>/dev/null; }
+
+cmd_hotkeys() {
+  case "$1" in
+    start)
+      launchctl enable "$GUI/$HKLABEL" 2>/dev/null
+      n=0
+      while [ $n -lt 10 ]; do
+        hk_loaded && break
+        launchctl bootstrap "$GUI" "$HKPLIST" 2>/dev/null
+        hk_loaded && break
+        n=$((n + 1)); sleep 0.5
+      done
+      launchctl kickstart "$GUI/$HKLABEL" 2>/dev/null
+      sleep 2
+      if hk_tapped; then
+        echo "hotkeys: running. Option+1..9 jumps to the session on F1..F9"
+      else
+        echo "hotkeys: started but the event tap was REFUSED."
+        echo "  Grant Input Monitoring to this exact binary:"
+        echo "    $HKPY"
+        echo "  System Settings > Privacy & Security > Input Monitoring"
+        echo "  then run: kbd hotkeys restart"
+      fi
+      ;;
+    stop)
+      launchctl bootout "$GUI/$HKLABEL" 2>/dev/null
+      launchctl disable "$GUI/$HKLABEL" 2>/dev/null
+      n=0
+      while [ $n -lt 20 ] && hk_alive; do n=$((n + 1)); sleep 0.25; done
+      hk_alive && pkill -f "keychron/hotkeys.py"
+      rm -f "$HKPID"
+      echo "hotkeys: stopped, and will not start at login"
+      ;;
+    restart) cmd_hotkeys stop >/dev/null; rm -f $KDIR/hotkeys.log; cmd_hotkeys start ;;
+    pause)   : > "$HKFLAG"; echo "hotkeys: paused (process still running, keys pass through)" ;;
+    resume)  rm -f "$HKFLAG"; echo "hotkeys: resumed" ;;
+    log)     tail -20 $KDIR/hotkeys.log 2>/dev/null || echo "  no log yet" ;;
+    watch)
+      echo "Press keys to see exactly what macOS reports. Ctrl-C to stop."
+      echo "Nothing is swallowed in this mode."
+      "$HKPY" "$KDIR/hotkeys.py" --watch
+      ;;
+    status|"")
+      if [ -e "$HKFLAG" ];  then echo "hotkeys: PAUSED"
+      elif hk_tapped;       then echo "hotkeys: on (Option+1..9 active)"
+      elif hk_alive;        then echo "hotkeys: running but tap refused - grant Input Monitoring to $HKPY"
+      else                       echo "hotkeys: off"
+      fi
+      ;;
+    *) echo "usage: kbd hotkeys start|stop|restart|pause|resume|status|log|watch" ;;
+  esac
+}
+
+cmd_autostart() {
+  case "$1" in
+    on)
+      agent_installed || die "kbd: $PLIST is missing; reinstall required"
+      launchctl enable "$GUI/$LABEL" 2>/dev/null
+      launchctl bootstrap "$GUI" "$PLIST" 2>/dev/null
+      sleep 1
+      agent_loaded && echo "autostart: ON (starts at login, restarts if it dies)" \
+                   || echo "autostart: failed to load"
+      ;;
+    off)
+      launchctl bootout "$GUI/$LABEL" 2>/dev/null
+      launchctl disable "$GUI/$LABEL" 2>/dev/null
+      echo "autostart: OFF (stopped now, and will not start at login)"
+      echo "  re-enable with: kbd autostart on"
+      "$PY" "$KDIR/kbd.py" restore >/dev/null 2>&1
+      ;;
+    remove)
+      launchctl bootout "$GUI/$LABEL" 2>/dev/null
+      launchctl disable "$GUI/$LABEL" 2>/dev/null
+      rm -f "$PLIST"
+      echo "autostart: agent file deleted ($PLIST)"
+      ;;
+    status|"")
+      if ! agent_installed; then echo "autostart: not installed"
+      elif agent_loaded;   then echo "autostart: ON (loaded)"
+      else                      echo "autostart: installed but not loaded"
+      fi
+      ;;
+    *) echo "usage: kbd autostart on|off|status|remove" ;;
+  esac
+}
+
+cmd_status() {
+  local state conn hooks pct5 pct7 live
+  [ -e "$FLAG" ] && state="OFF" || state="ON"
+  connected && conn="yes (USB, VIA channel live)" || conn="no (unplugged or wireless)"
+  if grep -q "keychron/hook.py" "$HOME/.claude/settings.json" 2>/dev/null; then
+    hooks="installed"
+  else
+    hooks="not installed"
+  fi
+  pct5=$(sed -n 1p "$USAGE_CACHE" 2>/dev/null || echo "?")
+  pct7=$(sed -n 2p "$USAGE_CACHE" 2>/dev/null || echo "?")
+  live=$("$PY" -c "import json;print(len(json.load(open('$SESSIONS'))))" 2>/dev/null || echo 0)
+
+  printf '  integration   : %s\n' "$state"
+  if ! agent_installed; then printf '  autostart     : not installed\n'
+  elif agent_loaded;   then printf '  autostart     : on\n'
+  else                      printf '  autostart     : off\n'; fi
+  printf '  hooks         : %s\n' "$hooks"
+  printf '  keyboard      : %s\n' "$conn"
+  printf '  hotkeys       : %s\n' "$(cmd_hotkeys status | sed 's/^hotkeys: //')"
+  printf '  usage 5h / 7d : %s%% / %s%%\n' "$pct5" "$pct7"
+  printf '  live sessions : %s\n' "$live"
+}
+
+cmd_test() {
+  connected || die "kbd: keyboard is not on USB. Plug in the cable and set the switch to Cable."
+  for s in working attention idle; do
+    printf '  %-10s ' "$s"
+    "$PY" "$KDIR/hook.py" "$s" </dev/null
+    case "$s" in
+      working)   echo "blue, medium" ;;
+      attention) echo "amber, bright, pulsing" ;;
+      idle)      echo "usage gauge (green -> red as your limit fills)" ;;
+    esac
+    sleep 2
+  done
+  echo "  restoring..."
+  "$PY" "$KDIR/kbd.py" restore
+}
+
+cmd_save() {
+  connected || die "kbd: keyboard is not on USB."
+  "$PY" - <<'PYEOF'
+import json, os, sys
+d = os.path.expanduser("~/.claude/keychron")
+sys.path.insert(0, d)
+import kbd
+p = kbd.require_device()
+g = lambda v: list(kbd.send(p, [kbd.CMD_CUSTOM_GET, kbd.CHANNEL_RGB_MATRIX, v])[3:7])
+s = {"effect": g(kbd.VAL_EFFECT)[0], "brightness": g(kbd.VAL_BRIGHTNESS)[0],
+     "speed": g(kbd.VAL_SPEED)[0], "hue": g(kbd.VAL_COLOR)[0], "sat": g(kbd.VAL_COLOR)[1]}
+json.dump(s, open(os.path.join(d, "saved_state.json"), "w"), indent=2)
+print("saved as your baseline:", s)
+PYEOF
+}
+
+case "${1:-}" in
+  on)        cmd_on ;;
+  off)       cmd_off ;;
+  toggle)    [ -e "$FLAG" ] && cmd_on || cmd_off ;;
+  status)    cmd_status ;;
+  test)      cmd_test ;;
+  save)      cmd_save ;;
+  daemon)    cmd_daemon "${2:-status}" ;;
+  autostart) cmd_autostart "${2:-status}" ;;
+  hotkeys)   cmd_hotkeys "${2:-status}" ;;
+  sessions|ls) "$PY" "$KDIR/sessions.py" list ;;
+  go)        "$PY" "$KDIR/sessions.py" go "${2:-}" ;;
+  install)   "$PY" "$KDIR/install_hooks.py" install ;;
+  uninstall) "$PY" "$KDIR/install_hooks.py" uninstall ;;
+  ""|-h|--help|help) usage ;;
+  *)         shift_args=("$@"); "$PY" "$KDIR/kbd.py" "${shift_args[@]}" ;;
+esac

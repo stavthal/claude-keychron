@@ -1,0 +1,9 @@
+# Local state, never publish: these hold session identifiers and your own lighting
+slots.json
+saved_state.json
+disabled
+hotkeys-disabled
+venv/
+__pycache__/
+*.pyc
+.DS_Store
