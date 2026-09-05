@@ -90,7 +90,7 @@ kbd off             # disable, restore your own lighting
 | `kbd status` | Integration, autostart, hotkeys, keyboard, usage, live sessions |
 | `kbd daemon start\|stop\|status` | The lighting renderer, this boot |
 | `kbd autostart on\|off\|status\|remove` | Whether it starts at login |
-| `kbd hotkeys start\|stop\|restart\|pause\|resume\|status\|log` | `Option+1..9` |
+| `kbd hotkeys start\|stop\|restart\|pause\|resume\|status\|log\|watch` | `Fn+F1..F9` and `Option+1..9`. `pause` releases the keys, `watch` shows what macOS reports |
 | `kbd sessions` (`ls`) | Numbered session list with slots and PR numbers |
 | `kbd go [n]` | Jump to session n (~0.03s). No n = whichever has waited longest |
 | `kbd restore` / `kbd save` | Restore your lighting / re-capture it as the baseline |
@@ -217,6 +217,12 @@ Your original lighting is captured at install time and restored by
   evicted.
 - **The red error state never fires on its own.** Claude Code has no error
   hook. It is reachable via `kbd preset error`.
+- **The bound keys stop reaching your apps.** `Fn+F1..F9`, `Option+1..9` and
+  `Option+F1..F9` are swallowed, so no character is typed and no app sees them.
+  If your F-row is in media mode, `Fn+F5` was your only way to send a real F5,
+  which matters in editors that bind the function row. `kbd hotkeys pause`
+  releases every binding while leaving the listener running, and
+  `kbd hotkeys resume` takes them back.
 - **F12's usage gauge needs `/tmp/.claude_usage_cache`**, a two-line file
   holding your 5-hour and 7-day utilisation percentages. This repo does not
   ship a fetcher for it. Without one, F12 simply sits green.
