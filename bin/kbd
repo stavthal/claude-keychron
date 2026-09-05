@@ -138,7 +138,7 @@ HKPY="$KDIR/venv/bin/kbd-hotkeys-python"
 
 hk_alive()  { pgrep -f "keychron/hotkeys.py" >/dev/null 2>&1; }
 hk_loaded() { launchctl print "$GUI/$HKLABEL" >/dev/null 2>&1; }
-hk_tapped() { grep -q "listening for Option" $KDIR/hotkeys.log 2>/dev/null; }
+hk_tapped() { grep -q "hotkeys: listening" "$KDIR/hotkeys.log" 2>/dev/null; }
 
 cmd_hotkeys() {
   case "$1" in
@@ -154,7 +154,7 @@ cmd_hotkeys() {
       launchctl kickstart "$GUI/$HKLABEL" 2>/dev/null
       sleep 2
       if hk_tapped; then
-        echo "hotkeys: running. Option+1..9 jumps to the session on F1..F9"
+        echo "hotkeys: running. Fn+F1..F9 and Option+1..9 jump to that session"
       else
         echo "hotkeys: started but the event tap was REFUSED."
         echo "  Grant Input Monitoring to this exact binary:"
@@ -183,7 +183,7 @@ cmd_hotkeys() {
       ;;
     status|"")
       if [ -e "$HKFLAG" ];  then echo "hotkeys: PAUSED"
-      elif hk_tapped;       then echo "hotkeys: on (Option+1..9 active)"
+      elif hk_tapped;       then echo "hotkeys: on (Fn+F1..F9 and Option+1..9 active)"
       elif hk_alive;        then echo "hotkeys: running but tap refused - grant Input Monitoring to $HKPY"
       else                       echo "hotkeys: off"
       fi
