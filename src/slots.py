@@ -50,17 +50,36 @@ def pr_status(d):
     return d.get("prNumber"), d.get("prState") == "OPEN"
 
 
+_META_CACHE = {}                       # path -> (mtime, parsed fields or None)
+
+
 def session_meta():
-    """cli_session_id -> {title, last, pr_open, local_id} for every live session."""
+    """cli_session_id -> {title, last, pr_open, local_id} for every live session.
+
+    Session records are large (tens of KB each, hundreds of them) and change
+    rarely, so each file is parsed once and reused until its mtime moves.
+    Without this a caller that runs in a loop re-parses hundreds of MB.
+    """
     out = {}
     for path in glob.glob(os.path.join(STORE, "*", "*", "local_*.json")):
+        try:
+            mtime = os.path.getmtime(path)
+        except OSError:
+            continue
+        hit = _META_CACHE.get(path)
+        if hit and hit[0] == mtime:
+            if hit[1]:
+                out[hit[1]["cli"]] = hit[1]["meta"]
+            continue
         try:
             with open(path) as fh:
                 d = json.load(fh)
         except Exception:
+            _META_CACHE[path] = (mtime, None)
             continue
         cli = d.get("cliSessionId")
         if not cli or d.get("isArchived"):
+            _META_CACHE[path] = (mtime, None)
             continue
         pr_num, pr_open = pr_status(d)
         out[cli] = {
@@ -71,6 +90,7 @@ def session_meta():
             "pr_open": pr_open,
             "pr_number": pr_num,
         }
+        _META_CACHE[path] = (mtime, {"cli": cli, "meta": out[cli]})
     return out
 
 
@@ -101,6 +121,17 @@ def release(cli_id):
     slots = _load()
     if slots.pop(cli_id, None) is not None:
         _save(slots)
+
+
+def lookup(slot):
+    """cli id for one slot, reading slots.json and nothing else.
+
+    current() prunes dead entries, which costs a walk of the whole session
+    store. A jump does not need pruning, and paid ~14s for it. This is ~0.15s,
+    which is the difference between a keypress feeling instant and feeling
+    broken. A stale entry simply opens a session that has since ended.
+    """
+    return {v: k for k, v in _load().items()}.get(slot)
 
 
 def current():

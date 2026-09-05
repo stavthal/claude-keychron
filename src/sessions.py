@@ -122,6 +122,19 @@ def cmd_go(arg):
             ["open", "claude://code/needs-input?source=kbd"], check=False)
         print("jumped to the session waiting longest for you")
         return
+
+    # Fast path. slots.json already maps slot -> cli id, so a jump needs one
+    # small file rather than a scan of every session record. The full scan is
+    # ~14s here (574 files, 310MB of JSON); this is ~0.15s.
+    try:
+        import slots as slotmap
+        cli = slotmap.lookup(int(arg))
+        if cli:
+            jump(cli)
+            print(f"jumped to slot {arg}")
+            return
+    except Exception:
+        pass                              # fall through to the full lookup
     n = int(arg)
     match = [s for s in sessions() if s["slot"] == n]
     if not match:
@@ -141,8 +154,12 @@ def main():
     elif cmd == "go":
         cmd_go(arg)
     elif cmd == "id":
-        m = [s for s in sessions() if s["slot"] == int(arg)]
-        print(m[0]["cli_id"] if m else "")
+        import slots as slotmap
+        cli = slotmap.lookup(int(arg))                 # fast path
+        if not cli:
+            m = [s for s in sessions() if s["slot"] == int(arg)]
+            cli = m[0]["cli_id"] if m else ""
+        print(cli)
     else:
         sys.exit(__doc__)
 

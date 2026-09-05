@@ -52,6 +52,7 @@ BLINKING = {"attention", "error"}
 TICK = 0.10
 BLINK_PERIOD = 0.70        # seconds per on/off half-cycle
 EFFECT_CHECK = 5.0         # re-assert per-key mode this often
+META_REFRESH = 4.0         # session titles and PR state change slowly
 BRIGHTNESS = 220
 
 _running = True
@@ -149,6 +150,7 @@ def main():
 
     board = Board()
     t = 0.0
+    meta, order, meta_at = {}, {}, -1e9
     try:
         while _running:
             if os.path.exists(DISABLED):
@@ -167,9 +169,12 @@ def main():
                     time.sleep(1.0)
                     t += 1.0
                     continue
+                # slot_order() also walks the session store, so refresh both
+                # on the same timer rather than on every frame.
+                if t - meta_at >= META_REFRESH:
+                    meta, order, meta_at = slotmap.session_meta(), slot_order(), t
                 blink_on = int(t / BLINK_PERIOD) % 2 == 0
-                frame = build_frame(read_states(), slot_order(),
-                                    slotmap.session_meta(), blink_on)
+                frame = build_frame(read_states(), order, meta, blink_on)
                 board.draw(path, tuple(frame), usage_colour())
             except Exception:
                 board.ready = False            # re-init on the next pass
