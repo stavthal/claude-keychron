@@ -158,10 +158,26 @@ A8 0A <start> <n>  Keychron: set colours for n LEDs from index start
 Colours land in the RAM array `HSV per_key_led[81]`. Nothing is written to
 flash, so this is safe to drive continuously.
 
-**Session jumping** uses `claude://resume?session=<uuid>`, a deep link the
-Claude desktop app already handles. Note that `claude://code/needs-input` only
-moves you when a session is genuinely blocked on a permission prompt, which
-makes it useless for jumping on demand.
+**Session jumping** uses two deep links, because they do different things:
+
+| Route | What the app does | Used for |
+|---|---|---|
+| `claude://code/continue?session=local_<id>` | `getSessionRoute()`, plain navigation | desktop sessions |
+| `claude://resume?session=<uuid>` | `importCliSession()`, validates the cwd | CLI sessions |
+
+Prefer `continue`. `resume` warns that the working directory "has moved and is
+no longer available" for any session whose cwd is gone, which is routine once
+the app has cleaned up a scratch workspace, and the warning is noise when you
+only wanted to switch. `claude://code/needs-input` moves you only when a
+session is genuinely blocked on a permission prompt, so it cannot serve as a
+general jump.
+
+**Both kinds of session are found.** Desktop sessions come from
+`~/Library/Application Support/Claude/claude-code-sessions`. Terminal sessions
+come from `~/.claude/projects/<encoded-cwd>/<uuid>.jsonl`, titled from the
+first thing you actually typed, skipping the injected scaffolding a transcript
+opens with. A desktop record wins when both exist, since it carries a real
+title, PR state, and the `local_` id needed to navigate.
 
 ### Why the code avoids the session store on hot paths
 
@@ -185,8 +201,12 @@ each walking the same store, and sat at **8.1% CPU** permanently. Records are
 now cached per file on mtime, and both refresh on a 4s timer, since titles and
 PR state change slowly. Sustained CPU is now **0.6%**.
 
-If you fork this, the rule is: `slots.json` is the hot path, the session store
-is the cold one. Keep it that way.
+The CLI transcript store is larger still (**3753 files, 588 MB** here), so it
+is never fully parsed: every file is stat-ed, which costs about 0.02s, and only
+the 14 most recent are read, head-first, until a title and cwd turn up.
+
+If you fork this, the rule is: `slots.json` is the hot path, both session
+stores are cold. Keep it that way.
 
 ## Safety
 

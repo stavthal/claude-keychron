@@ -11,6 +11,7 @@ nine are taken, the least recently active holder is evicted.
 import glob
 import json
 import os
+import re
 
 BASE = os.path.dirname(os.path.abspath(__file__))
 SLOTS_FILE = os.path.join(BASE, "slots.json")
@@ -76,7 +77,122 @@ def pr_status(d):
     return d.get("prNumber"), d.get("prState") == "OPEN"
 
 
+CLI_STORE = os.path.expanduser("~/.claude/projects")
+CLI_SCAN = 14                          # only the most recent are worth parsing
+
 _META_CACHE = {}                       # path -> (mtime, parsed fields or None)
+_CLI_CACHE = {}                        # path -> (mtime, parsed fields or None)
+
+
+# Transcripts open with injected scaffolding rather than anything the user
+# typed, so a naive "first user message" title reads as gibberish.
+_SYNTHETIC = ("caveat:", "<local-command", "<command-name", "<command-message",
+              "<command-args", "<system-reminder", "<user-prompt-submit-hook",
+              "this session is being continued", "<bash-input", "<bash-stdout")
+
+
+def _first_real_line(text):
+    """The first line the user actually typed, or None."""
+    if not isinstance(text, str):
+        return None
+    body = re.sub(r"<[^>]{1,80}>", " ", text)          # drop tag wrappers
+    for line in body.splitlines():
+        line = " ".join(line.split())
+        if not line or len(line) < 3:
+            continue
+        if any(line.lower().startswith(p) for p in _SYNTHETIC):
+            continue
+        return line[:60]
+    return None
+
+
+def _cli_title_and_cwd(path):
+    """First user message and cwd, read from the head of a transcript.
+
+    Transcripts run to megabytes, so this stops as soon as it has both, and
+    never reads past the first 40 lines.
+    """
+    cwd = title = None
+    try:
+        with open(path, errors="replace") as fh:
+            for i, line in enumerate(fh):
+                if i > 120:
+                    break
+                try:
+                    d = json.loads(line)
+                except Exception:
+                    continue
+                cwd = cwd or d.get("cwd")
+                if not title and d.get("type") == "user":
+                    content = (d.get("message") or {}).get("content")
+                    text = None
+                    if isinstance(content, str):
+                        text = content
+                    elif isinstance(content, list):
+                        for part in content:
+                            if isinstance(part, dict) and part.get("type") == "text":
+                                text = part.get("text")
+                                break
+                    text = _first_real_line(text)
+                    if text:
+                        title = text
+                if cwd and title:
+                    break
+    except OSError:
+        return None, None
+    return title, cwd
+
+
+def cli_sessions():
+    """cli_session_id -> meta for recent Claude Code CLI sessions.
+
+    These live in ~/.claude/projects/<encoded-cwd>/<uuid>.jsonl and never
+    appear in the desktop store, so without this a session started in the
+    terminal gets a slot from the hook and is then pruned straight back out.
+
+    Stats every transcript (~3700 files, ~0.02s) but parses only the most
+    recent CLI_SCAN, because the store runs to hundreds of megabytes.
+    """
+    rows = []
+    try:
+        for d in os.scandir(CLI_STORE):
+            if not d.is_dir():
+                continue
+            try:
+                for f in os.scandir(d.path):
+                    if f.name.endswith(".jsonl"):
+                        try:
+                            rows.append((f.stat().st_mtime, f.path, f.name[:-6]))
+                        except OSError:
+                            pass
+            except OSError:
+                continue
+    except OSError:
+        return {}
+    rows.sort(reverse=True)
+
+    out = {}
+    for mtime, path, cli in rows[:CLI_SCAN]:
+        hit = _CLI_CACHE.get(path)
+        if hit and hit[0] == mtime:
+            if hit[1]:
+                out[cli] = dict(hit[1], last=int(mtime * 1000))
+            continue
+        title, cwd = _cli_title_and_cwd(path)
+        if not title and not cwd:
+            _CLI_CACHE[path] = (mtime, None)
+            continue
+        meta = {
+            "title": title or "(untitled CLI session)",
+            "cwd": os.path.basename(cwd or ""),
+            "local_id": "",             # no desktop record, so jump via resume
+            "pr_open": False,
+            "pr_number": None,
+            "cli_only": True,
+        }
+        _CLI_CACHE[path] = (mtime, meta)
+        out[cli] = dict(meta, last=int(mtime * 1000))
+    return out
 
 
 def session_meta():
@@ -117,6 +233,11 @@ def session_meta():
             "pr_number": pr_num,
         }
         _META_CACHE[path] = (mtime, {"cli": cli, "meta": out[cli]})
+
+    # CLI sessions fill in the gaps. A desktop record always wins, because it
+    # carries a real title, PR state and the local_ id needed to navigate.
+    for cli, meta in cli_sessions().items():
+        out.setdefault(cli, meta)
     return out
 
 
@@ -183,7 +304,10 @@ def current():
 
 
 def backfill():
-    """Give a slot to any live session that predates sticky assignment."""
+    """Give a slot to any live session that predates sticky assignment.
+
+    Covers CLI sessions too, since session_meta() merges both stores.
+    """
     meta = session_meta()
     slots = _load()
     missing = [c for c in meta if c not in slots]

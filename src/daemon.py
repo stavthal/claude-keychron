@@ -52,7 +52,10 @@ BLINKING = {"attention", "error"}
 TICK = 0.10
 BLINK_PERIOD = 0.70        # seconds per on/off half-cycle
 EFFECT_CHECK = 5.0         # re-assert per-key mode this often
-META_REFRESH = 4.0         # session titles and PR state change slowly
+# Titles, PR state and slot ownership change slowly, and gathering them now
+# also walks the CLI transcript store. Live session state is read from a small
+# file on every frame instead, so this can be lazy without the board lagging.
+META_REFRESH = 12.0
 BRIGHTNESS = 220
 
 _running = True

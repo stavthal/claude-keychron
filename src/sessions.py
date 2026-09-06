@@ -38,45 +38,29 @@ def states():
 
 
 def sessions():
-    """Every non-archived desktop session, most urgent then most recent."""
-    st = states()
-    out, seen = [], set()
-    paths = []
-    for store in STORES:
-        paths += glob.glob(os.path.join(store, "*", "*", "local_*.json"))
-    # newest first, so the surviving record for a de-duplicated session is the
-    # most recent one rather than whichever the glob happened to return first
-    paths.sort(key=lambda p: os.path.getmtime(p), reverse=True)
-    for path in paths:
-        try:
-            with open(path) as fh:
-                d = json.load(fh)
-        except Exception:
-            continue
-        cli = d.get("cliSessionId", "")
-        # De-duplicate on the CLI id, not the local_ id: one CLI session can
-        # appear under several local_ ids (a resume writes a new record), which
-        # would otherwise show the same session twice on the same slot.
-        key = cli or d.get("sessionId")
-        if d.get("isArchived") or key in seen:
-            continue
-        seen.add(key)
-        out.append({
-            "local_id": d.get("sessionId", ""),
-            "cli_id": cli,
-            "title": d.get("title") or "(untitled)",
-            "cwd": os.path.basename(d.get("cwd", "") or ""),
-            "last": d.get("lastActivityAt", 0),
-            "state": st.get(cli, {}).get("state", "idle"),
-            "pr_open": _pr(d)[1],
-            "pr_number": _pr(d)[0],
-        })
-    # Slots come from slots.py, claimed at session start and held until it
-    # ends, so F3 keeps meaning the same session. The daemon reads the same map.
+    """Every live session, desktop and CLI, newest first.
+
+    Rows come from slots.session_meta(), which merges the desktop store with
+    recent CLI transcripts. Building them here separately would miss CLI
+    sessions entirely, which is what used to happen.
+    """
     import slots as slotmap
-    owner = {cli: n for n, cli in slotmap.current().items()}
-    for row in out:
-        row["slot"] = owner.get(row["cli_id"])
+    st = states()
+    owner = {cli: v for v, cli in slotmap.current().items()}
+    out = []
+    for cli, m in slotmap.session_meta().items():
+        out.append({
+            "cli_id": cli,
+            "local_id": m.get("local_id", ""),
+            "title": m.get("title") or "(untitled)",
+            "cwd": m.get("cwd", ""),
+            "last": m.get("last", 0),
+            "state": st.get(cli, {}).get("state", "idle"),
+            "pr_open": m.get("pr_open", False),
+            "pr_number": m.get("pr_number"),
+            "cli_only": m.get("cli_only", False),
+            "slot": owner.get(cli),
+        })
     out.sort(key=lambda s: -s["last"])
     return out
 
@@ -102,8 +86,10 @@ def cmd_list():
         else:
             ago = f"{int(age/86400)}d"
         pr = f"PR#{s['pr_number']}" if s.get("pr_open") else ""
+        kind = "cli" if s.get("cli_only") else ""
         print(f"  F{i}  {GLYPH.get(s['state'], s['state']):10s} "
-              f"{s['title'][:34]:34s} {s['cwd'][:16]:16s} {pr:>7s} {ago:>4s} ago")
+              f"{s['title'][:32]:32s} {s['cwd'][:15]:15s} {kind:>3s} "
+              f"{pr:>7s} {ago:>4s} ago")
 
 
 def jump(cli_id, local_id=""):
