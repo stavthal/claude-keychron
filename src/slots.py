@@ -19,13 +19,39 @@ STORE = os.path.expanduser(
 MAX_SLOTS = 9
 
 
-def _load():
+def _raw():
+    """slots.json exactly as stored, for detecting an un-migrated file."""
     try:
         with open(SLOTS_FILE) as fh:
             d = json.load(fh)
-        return {k: int(v) for k, v in d.items()} if isinstance(d, dict) else {}
+        return d if isinstance(d, dict) else {}
     except Exception:
         return {}
+
+
+def _load():
+    """cli id -> {"slot": int, "local": str}.
+
+    Accepts the older cli -> int shape and upgrades it in memory, so an
+    existing slots.json keeps working after an update.
+    """
+    try:
+        with open(SLOTS_FILE) as fh:
+            d = json.load(fh)
+        if not isinstance(d, dict):
+            return {}
+    except Exception:
+        return {}
+    out = {}
+    for k, v in d.items():
+        if isinstance(v, dict) and "slot" in v:
+            out[k] = {"slot": int(v["slot"]), "local": v.get("local", "")}
+        else:
+            try:
+                out[k] = {"slot": int(v), "local": ""}
+            except (TypeError, ValueError):
+                continue
+    return out
 
 
 def _save(d):
@@ -99,20 +125,23 @@ def assign(cli_id):
     if not cli_id:
         return None
     slots = _load()
-    if cli_id in slots:
-        return slots[cli_id]
-
     meta = session_meta()
+    local = meta.get(cli_id, {}).get("local_id", "")
+    if cli_id in slots:
+        if local and slots[cli_id].get("local") != local:
+            slots[cli_id]["local"] = local      # a resume writes a new record
+            _save(slots)
+        return slots[cli_id]["slot"]
     # drop holders whose session file is gone entirely
     slots = {k: v for k, v in slots.items() if k in meta or k == cli_id}
 
-    taken = set(slots.values())
+    taken = {v["slot"] for v in slots.values()}
     free = next((n for n in range(1, MAX_SLOTS + 1) if n not in taken), None)
     if free is None:
         # evict the least recently active holder
         oldest = min(slots, key=lambda k: meta.get(k, {}).get("last", 0))
-        free = slots.pop(oldest)
-    slots[cli_id] = free
+        free = slots.pop(oldest)["slot"]
+    slots[cli_id] = {"slot": free, "local": local}
     _save(slots)
     return free
 
@@ -131,16 +160,26 @@ def lookup(slot):
     which is the difference between a keypress feeling instant and feeling
     broken. A stale entry simply opens a session that has since ended.
     """
-    return {v: k for k, v in _load().items()}.get(slot)
+    for cli, v in _load().items():
+        if v["slot"] == slot:
+            return cli, v.get("local", "")
+    return None, ""
 
 
 def current():
     """slot -> cli_session_id, pruned of sessions whose files no longer exist."""
     slots, meta = _load(), session_meta()
-    pruned = {k: v for k, v in slots.items() if k in meta}
-    if pruned != slots:
+    pruned = {k: dict(v) for k, v in slots.items() if k in meta}
+    changed = len(pruned) != len(slots)
+    for cli, v in pruned.items():               # keep local_ ids fresh
+        local = meta.get(cli, {}).get("local_id", "")
+        if local and v.get("local") != local:
+            v["local"] = local
+            changed = True
+    # _load() also upgrades the older cli -> int shape, so persist that too.
+    if changed or any(not isinstance(x, dict) for x in _raw().values()):
         _save(pruned)
-    return {v: k for k, v in pruned.items()}
+    return {v["slot"]: k for k, v in pruned.items()}
 
 
 def backfill():

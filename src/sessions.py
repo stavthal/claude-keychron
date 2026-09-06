@@ -106,14 +106,23 @@ def cmd_list():
               f"{s['title'][:34]:34s} {s['cwd'][:16]:16s} {pr:>7s} {ago:>4s} ago")
 
 
-def jump(cli_id):
+def jump(cli_id, local_id=""):
     """Focus a specific session.
 
-    Uses claude://resume, which takes the CLI uuid and works for any session.
-    claude://code/needs-input only moves when a session is genuinely blocked
-    on a permission prompt, so it is no use for jumping on demand.
+    Prefers claude://code/continue?session=local_<id>. In the app that resolves
+    to getSessionRoute() and simply navigates. claude://resume goes down
+    importCliSession() instead, which validates the working directory and warns
+    that it "has moved and is no longer available" for any session whose cwd is
+    gone, which is normal for the app's own scratch workspaces.
+
+    claude://code/needs-input only moves when a session is genuinely blocked on
+    a permission prompt, so it is no use for jumping on demand.
     """
-    subprocess.run(["open", f"claude://resume?session={cli_id}"], check=False)
+    if local_id:
+        url = f"claude://code/continue?session={local_id}&source=kbd"
+    else:
+        url = f"claude://resume?session={cli_id}"     # fallback
+    subprocess.run(["open", url], check=False)
 
 
 def cmd_go(arg):
@@ -128,9 +137,9 @@ def cmd_go(arg):
     # ~14s here (574 files, 310MB of JSON); this is ~0.15s.
     try:
         import slots as slotmap
-        cli = slotmap.lookup(int(arg))
-        if cli:
-            jump(cli)
+        cli, local = slotmap.lookup(int(arg))
+        if cli or local:
+            jump(cli, local)
             print(f"jumped to slot {arg}")
             return
     except Exception:
@@ -140,9 +149,9 @@ def cmd_go(arg):
     if not match:
         sys.exit(f"no session in slot {n}")
     s = match[0]
-    if not s["cli_id"]:
-        sys.exit(f"session {n} has no CLI id; cannot jump to it")
-    jump(s["cli_id"])
+    if not s["cli_id"] and not s["local_id"]:
+        sys.exit(f"session {n} has no id; cannot jump to it")
+    jump(s["cli_id"], s["local_id"])
     print(f"jumped to {n}: {s['title']}")
 
 
@@ -155,7 +164,7 @@ def main():
         cmd_go(arg)
     elif cmd == "id":
         import slots as slotmap
-        cli = slotmap.lookup(int(arg))                 # fast path
+        cli, _local = slotmap.lookup(int(arg))         # fast path
         if not cli:
             m = [s for s in sessions() if s["slot"] == int(arg)]
             cli = m[0]["cli_id"] if m else ""
